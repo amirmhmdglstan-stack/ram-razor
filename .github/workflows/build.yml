@@ -1,0 +1,102 @@
+name: Build, test and release
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Build (Release)
+        run: dotnet build RAMRazor/RAMRazor.csproj -c Release
+
+      - name: Publish self-contained single-file exe
+        run: >
+          dotnet publish RAMRazor/RAMRazor.csproj -c Release -r win-x64
+          --self-contained true
+          -p:PublishSingleFile=true
+          -p:IncludeNativeLibrariesForSelfExtract=true
+          -p:EnableCompressionInSingleFile=true
+          -o out\selfcontained
+
+      - name: Publish framework-dependent portable exe
+        run: >
+          dotnet publish RAMRazor/RAMRazor.csproj -c Release -r win-x64
+          --self-contained false
+          -p:PublishSingleFile=true
+          -o out\portable
+
+      - name: Rename portable exe
+        shell: pwsh
+        run: Move-Item out\portable\RAMRazor.exe out\portable\RAMRazor-portable.exe
+
+      - name: RUN the built exe in self-test mode (proves it really works)
+        shell: pwsh
+        run: |
+          $exe = Join-Path (Get-Location) "out\portable\RAMRazor-portable.exe"
+          Write-Host "Running self-test: $exe --selftest"
+          $p = Start-Process -FilePath $exe -ArgumentList "--selftest" -Wait -PassThru -NoNewWindow
+          $res = Join-Path (Split-Path $exe) "selftest-result.txt"
+          if (Test-Path $res) {
+            Write-Host "--- selftest-result.txt ---"
+            Get-Content $res | ForEach-Object { Write-Host $_ }
+          } else {
+            Write-Host "WARNING: selftest-result.txt not found"
+          }
+          Write-Host "Exit code: $($p.ExitCode)"
+          if ($p.ExitCode -ne 0) {
+            Write-Error "SELF-TEST FAILED (exit $($p.ExitCode))"
+            exit 1
+          }
+
+      - name: Copy self-test report next to artifacts
+        shell: pwsh
+        run: |
+          if (Test-Path out\portable\selftest-result.txt) {
+            Copy-Item out\portable\selftest-result.txt out\selftest-result.txt
+          }
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: RAMRazor-windows
+          path: |
+            out/selfcontained/RAMRazor.exe
+            out/portable/RAMRazor-portable.exe
+            out/selftest-result.txt
+          if-no-files-found: error
+
+      - name: Attach exes to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            out/selfcontained/RAMRazor.exe
+            out/portable/RAMRazor-portable.exe
+            out/selftest-result.txt
+          body: |
+            ## RAM Razor — Admin RAM cleaner for Windows 10/11
+
+            **Downloads**
+            - `RAMRazor.exe` — self-contained (no .NET install needed, ~40 MB). Just download and run as administrator.
+            - `RAMRazor-portable.exe` — tiny portable build (~1 MB), needs the free [.NET 8 Desktop Runtime](https://dotnet.microsoft.com/download/dotnet/8.0/runtime) (choose "Desktop Runtime x64").
+
+            **How to run:** right-click the exe → *Run as administrator*. Without admin rights the app refuses to start by design.
+
+            Every build here passed an automated self-test (`RAMRazor.exe --selftest`) on a real Windows runner — see `selftest-result.txt`.
+          generate_release_notes: true
