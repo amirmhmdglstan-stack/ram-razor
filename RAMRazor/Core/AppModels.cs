@@ -54,18 +54,37 @@ public sealed class AppGroup
     public IEnumerable<int> Pids => Processes.Select(p => p.Id);
 }
 
+public sealed class CleanStage
+{
+    public string Name { get; set; } = "";
+    public bool Ok { get; set; }
+    public string Detail { get; set; } = "";
+}
+
 public sealed class CleanResult
 {
     public long FreedBytes { get; set; }
     public ulong TotalBytes { get; set; }
+    public ulong BeforeBytes { get; set; }
+    public ulong AfterBytes { get; set; }
     public double BeforePercent { get; set; }
     public double AfterPercent { get; set; }
     public bool DeepClean { get; set; }
+    public CleanMode Mode { get; set; } = CleanMode.Deep;
     public bool StandbyPurged { get; set; }
     public string Note { get; set; } = "";
+    public Dictionary<string, bool>? Privileges { get; set; }
+    public List<CleanStage> Stages { get; set; } = new();
 
     public double FreedPercentOfTotal =>
         TotalBytes <= 0 ? 0 : Math.Round(FreedBytes * 100.0 / TotalBytes, 1);
+
+    public string ModeName => Mode switch
+    {
+        CleanMode.Light => "light",
+        CleanMode.Deep => "deep",
+        _ => "extreme"
+    };
 }
 
 public sealed class AlertItem

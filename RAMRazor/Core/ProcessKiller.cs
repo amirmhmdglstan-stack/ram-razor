@@ -127,6 +127,48 @@ public static class ProcessKiller
         }
     }
 
+    /// <summary>
+    /// Fast mass-kill path used by Smart Clean: direct tree kill, no taskkill
+    /// spawn (spawning one taskkill per process is far too slow for 100+ targets).
+    /// Falls back to the full pipeline when the direct kill is refused.
+    /// </summary>
+    public static (KillOutcome, string) KillPidFast(int pid)
+    {
+        Process? p = null;
+        try
+        {
+            try { p = Process.GetProcessById(pid); }
+            catch (ArgumentException) { return (KillOutcome.AlreadyGone, "process not found"); }
+            if (p is null) return (KillOutcome.AlreadyGone, "process not found");
+
+            string name = "<unknown>";
+            try { name = p.ProcessName; } catch { }
+
+            try
+            {
+                p.Kill(entireProcessTree: true);
+                p.WaitForExit(2000);
+            }
+            catch
+            {
+                if (Gone(pid)) return (KillOutcome.Closed, "closed");
+                return KillPid(pid, force: true); // full pipeline: graceful -> taskkill /T /F -> .NET kill
+            }
+
+            return Gone(pid)
+                ? (KillOutcome.Closed, $"fast-killed ({name})")
+                : KillPid(pid, force: true);
+        }
+        catch
+        {
+            return KillPid(pid, force: true);
+        }
+        finally
+        {
+            try { p?.Dispose(); } catch { }
+        }
+    }
+
     public static bool Gone(int pid)
     {
         try

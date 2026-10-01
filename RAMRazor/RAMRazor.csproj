@@ -10,7 +10,7 @@
     <AssemblyName>RAMRazor</AssemblyName>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>app.ico</ApplicationIcon>
-    <Version>1.0.0</Version>
+    <Version>2.0.0</Version>
     <Product>RAM Razor</Product>
     <AssemblyTitle>RAM Razor — Admin RAM Cleaner</AssemblyTitle>
     <Description>Admin-only RAM cleaner and background-app terminator for Windows 10/11</Description>

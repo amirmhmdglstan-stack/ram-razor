@@ -8,6 +8,8 @@ internal sealed partial class MainForm : Form
     private readonly ProcessEnumerator _enumerator;
     private readonly BlacklistStore _blacklist;
     private readonly Watchdog _watchdog;
+    private readonly AppSettings _settings;
+    private readonly SettingsStore _settingsStore;
 
     private List<ProcInfo> _currentProcs = new();
     private List<AppGroup> _currentGroups = new();
@@ -18,16 +20,18 @@ internal sealed partial class MainForm : Form
 
     // UI controls
     private readonly RamGauge _gauge;
+    private readonly RamGraph _graph;
     private readonly BufferedListView _list;
     private readonly Label _lblUsed, _lblAvail, _lblProcs, _lblClean, _lblStatus, _lblAdmin;
-    private readonly CheckBox _chkDeep, _chkShowSystem, _chkAutoRekill, _chkMinerScan, _chkAutoClean;
+    private readonly CheckBox _chkShowSystem;
+    private readonly ComboBox _cmbLevel, _cmbScope;
     private readonly RadioButton _rbApps, _rbTasks;
-    private readonly Button _btnClean, _btnCloseAll, _btnSel, _btnAllBut, _btnForceForever,
-                            _btnBlacklist, _btnLog, _btnScanMiners, _btnRefresh;
+    private readonly Button _btnClean, _btnSmart, _btnCloseAll, _btnSel, _btnAllBut, _btnForceForever,
+                            _btnBlacklist, _btnLog, _btnScanMiners, _btnRefresh, _btnSettings;
     private readonly System.Windows.Forms.Timer _refreshTimer, _watchTimer, _minerTimer;
     private readonly NotifyIcon _tray;
     private Container _components;
-    private readonly ContextMenuStrip _listMenu;
+    private readonly ContextMenuStrip _listMenu, _trayMenu;
 
     // alerts (miner findings / unkillable / re-opened)
     private readonly List<AlertItem> _pendingAlerts = new();
@@ -35,16 +39,19 @@ internal sealed partial class MainForm : Form
     private readonly HashSet<string> _alertSuppressed = new();
     private DateTime _lastAutoClean = DateTime.Now;
 
-    public MainForm()
+    public MainForm(AppSettings settings)
     {
         LogService.Init();
+        _settingsStore = new SettingsStore();
+        _settings = settings;
+        LogService.FileLogging = _settings.LogToFile;
         _blacklist = new BlacklistStore();
         _enumerator = new ProcessEnumerator();
         _watchdog = new Watchdog(_blacklist, _enumerator);
 
         Text = "RAM Razor — Admin RAM Cleaner (Windows 10/11)";
-        ClientSize = new Size(1000, 720);
-        MinimumSize = new Size(940, 700);
+        ClientSize = new Size(1080, 720);
+        MinimumSize = new Size(1000, 700);
         BackColor = Theme.Bg;
         ForeColor = Theme.Text;
         Font = new Font("Segoe UI", 9f);
@@ -62,22 +69,66 @@ internal sealed partial class MainForm : Form
         _lblProcs.Location = new Point(182, 76);
         _lblClean = Theme.Label("No clean performed yet.", Theme.Ok, 9f);
         _lblClean.Location = new Point(182, 100);
+        _lblClean.MaximumSize = new Size(360, 0);
 
-        _chkDeep = Theme.CheckBox("Deep clean (purge standby list — needs admin)", true);
-        _chkDeep.Location = new Point(182, 130);
+        // CLEAN RAM intensity combo
+        _cmbLevel = new ComboBox
+        {
+            DropDownStyle = ComboBoxStyle.DropDownList,
+            FlatStyle = FlatStyle.Flat,
+            BackColor = Theme.Panel,
+            ForeColor = Theme.Text,
+            Font = new Font("Segoe UI", 8.5f),
+            Location = new Point(378, 76),
+            Size = new Size(150, 24)
+        };
+        _cmbLevel.Items.AddRange(new object[] { "Light", "Deep", "Extreme" });
+        _cmbLevel.SelectedIndex = _settings.CleanLevel switch { "Light" => 0, "Extreme" => 2, _ => 1 };
+        _cmbLevel.SelectedIndexChanged += (_, _) =>
+            LogService.Add("INFO", "SETTINGS", $"clean level = {_cmbLevel.SelectedItem}");
+
+        // Smart clean scope combo
+        _cmbScope = new ComboBox
+        {
+            DropDownStyle = ComboBoxStyle.DropDownList,
+            FlatStyle = FlatStyle.Flat,
+            BackColor = Theme.Panel,
+            ForeColor = Theme.Text,
+            Font = new Font("Segoe UI", 8.5f),
+            Location = new Point(548, 76),
+            Size = new Size(160, 24)
+        };
+        _cmbScope.Items.AddRange(new object[] { "Standard scope", "Nuclear scope" });
+        _cmbScope.SelectedIndex = _settings.SmartScope == "Nuclear" ? 1 : 0;
+        _cmbScope.SelectedIndexChanged += (_, _) =>
+            LogService.Add("INFO", "SETTINGS", $"smart clean scope = {_cmbScope.SelectedItem}");
 
         _btnClean = Theme.Button("CLEAN RAM", Theme.AccentDk, Theme.Text, 150, 46);
         _btnClean.Location = new Point(378, 24);
         _btnClean.Click += (_, _) => DoCleanRam();
 
-        _chkAutoClean = Theme.CheckBox("Auto-clean every 10 minutes", false, Theme.TextDim);
-        _chkAutoClean.Location = new Point(378, 84);
+        _btnSmart = Theme.Button("SMART CLEAN", Theme.Ok, Color.FromArgb(20, 30, 18), 160, 46);
+        _btnSmart.Location = new Point(548, 24);
+        _btnSmart.Click += (_, _) => DoSmartClean();
+
+        _graph = new RamGraph
+        {
+            Location = new Point(ClientSize.Width - 260, 24),
+            Size = new Size(244, 76),
+            Anchor = AnchorStyles.Top | AnchorStyles.Right
+        };
+
+        _btnSettings = Theme.Button("Settings", Theme.Panel, Theme.Text, 110, 26);
+        _btnSettings.Location = new Point(ClientSize.Width - 260, 108);
+        _btnSettings.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+        _btnSettings.Click += (_, _) => OpenSettings();
 
         _lblAdmin = Theme.Label("", Theme.Ok, 10f, bold: true);
-        _lblAdmin.Location = new Point(ClientSize.Width - 220, 20);
+        _lblAdmin.Location = new Point(ClientSize.Width - 130, 24);
         _lblAdmin.Anchor = AnchorStyles.Top | AnchorStyles.Right;
 
-        Controls.AddRange(new Control[] { _gauge, _lblUsed, _lblAvail, _lblProcs, _lblClean, _chkDeep, _btnClean, _chkAutoClean, _lblAdmin });
+        Controls.AddRange(new Control[] { _gauge, _lblUsed, _lblAvail, _lblProcs, _lblClean,
+            _cmbLevel, _cmbScope, _btnClean, _btnSmart, _graph, _btnSettings, _lblAdmin });
 
         // ---------- toolbar ----------
         var lblList = Theme.Label("Running software:", Theme.TextDim, 9.5f, bold: true);
@@ -137,6 +188,7 @@ internal sealed partial class MainForm : Form
         _listMenu.Items.Add("Close (graceful first)", null, (_, _) => ContextClose(false));
         _listMenu.Items.Add("Force close", null, (_, _) => ContextClose(true));
         _listMenu.Items.Add("Force close forever (blacklist)", null, (_, _) => DoForceSelectedForever());
+        _listMenu.Items.Add("Protect from Smart Clean (keep-list)", null, (_, _) => ContextAddToKeepList());
         _listMenu.Items.Add("Copy executable path", null, (_, _) => ContextCopyPath());
         _list.ContextMenuStrip = _listMenu;
 
@@ -145,6 +197,7 @@ internal sealed partial class MainForm : Form
         // ---------- action buttons ----------
         _btnCloseAll = Theme.Button("CLOSE ALL APPS", Theme.Danger, Color.White, 170, 44);
         _btnCloseAll.Location = new Point(16, ClientSize.Height - 158);
+        _btnCloseAll.Anchor = AnchorStyles.Bottom | AnchorStyles.Left;
         _btnCloseAll.Anchor = AnchorStyles.Bottom | AnchorStyles.Left;
         _btnCloseAll.Click += (_, _) => DoCloseAll();
 
@@ -163,6 +216,11 @@ internal sealed partial class MainForm : Form
         _btnForceForever.Anchor = AnchorStyles.Bottom | AnchorStyles.Left;
         _btnForceForever.Click += (_, _) => DoForceSelectedForever();
 
+        var lblHint = Theme.Label("SMART CLEAN with nothing ticked closes every non-essential task — see Settings", Theme.TextDim, 8.5f);
+        lblHint.Location = new Point(566, ClientSize.Height - 104);
+        lblHint.Anchor = AnchorStyles.Bottom | AnchorStyles.Left;
+        Controls.Add(lblHint);
+
         _btnBlacklist = Theme.Button("Blacklist", Theme.Panel, Theme.Text, 130, 36);
         _btnBlacklist.Location = new Point(16, ClientSize.Height - 104);
         _btnBlacklist.Anchor = AnchorStyles.Bottom | AnchorStyles.Left;
@@ -178,18 +236,8 @@ internal sealed partial class MainForm : Form
         _btnScanMiners.Anchor = AnchorStyles.Bottom | AnchorStyles.Left;
         _btnScanMiners.Click += (_, _) => RunMinerScan(manual: true);
 
-        _chkAutoRekill = Theme.CheckBox("Auto re-kill apps that open back", false, Theme.TextDim);
-        _chkAutoRekill.Location = new Point(452, ClientSize.Height - 100);
-        _chkAutoRekill.Anchor = AnchorStyles.Bottom | AnchorStyles.Left;
-        _chkAutoRekill.CheckedChanged += (_, _) =>
-            LogService.Add("INFO", "SETTINGS", $"auto re-kill = {_chkAutoRekill.Checked}");
-
-        _chkMinerScan = Theme.CheckBox("Miner scan every 20 s", true, Theme.TextDim);
-        _chkMinerScan.Location = new Point(680, ClientSize.Height - 100);
-        _chkMinerScan.Anchor = AnchorStyles.Bottom | AnchorStyles.Left;
-
         Controls.AddRange(new Control[] { _btnCloseAll, _btnSel, _btnAllBut, _btnForceForever,
-            _btnBlacklist, _btnLog, _btnScanMiners, _chkAutoRekill, _chkMinerScan });
+            _btnBlacklist, _btnLog, _btnScanMiners });
 
         // ---------- status ----------
         _lblStatus = Theme.Label("Starting…", Theme.TextDim, 9f);
@@ -207,6 +255,14 @@ internal sealed partial class MainForm : Form
         };
         _tray.DoubleClick += (_, _) => RestoreFromTray();
 
+        _trayMenu = new ContextMenuStrip();
+        _trayMenu.Items.Add("Show", null, (_, _) => RestoreFromTray());
+        _trayMenu.Items.Add("Clean RAM now", null, (_, _) => DoCleanRam());
+        _trayMenu.Items.Add("Smart clean now", null, (_, _) => DoSmartClean());
+        _trayMenu.Items.Add(new ToolStripSeparator());
+        _trayMenu.Items.Add("Exit", null, (_, _) => Close());
+        _tray.ContextMenuStrip = _trayMenu;
+
         // ---------- timers ----------
         _refreshTimer = new System.Windows.Forms.Timer { Interval = 3000 };
         _refreshTimer.Tick += (_, _) => RefreshData();
@@ -214,8 +270,9 @@ internal sealed partial class MainForm : Form
         _watchTimer = new System.Windows.Forms.Timer { Interval = 4000 };
         _watchTimer.Tick += (_, _) => WatchTick();
 
-        _minerTimer = new System.Windows.Forms.Timer { Interval = 20000 };
-        _minerTimer.Tick += (_, _) => { if (_chkMinerScan.Checked) RunMinerScan(manual: false); };
+        int minerSec = Math.Clamp(_settings.MinerIntervalSec, 10, 600);
+        _minerTimer = new System.Windows.Forms.Timer { Interval = minerSec * 1000 };
+        _minerTimer.Tick += (_, _) => { if (_settings.MinerScan) RunMinerScan(manual: false); };
 
         _watchdog.Reopened += display =>
         {
@@ -239,12 +296,61 @@ internal sealed partial class MainForm : Form
     protected override void OnShown(EventArgs e)
     {
         base.OnShown(e);
-        _lblAdmin.Text = "ADMIN MODE ✔";
+        _lblAdmin.Text = "ADMIN ✔";
         _lblAdmin.ForeColor = Theme.Ok;
         RefreshData();
         _refreshTimer.Start();
         _watchTimer.Start();
         _minerTimer.Start();
+
+        if (_settings.CleanAtStartup)
+        {
+            LogService.Add("INFO", "SETTINGS", "clean at startup triggered");
+            DoCleanRam();
+        }
+        if (_settings.StartInTray)
+        {
+            WindowState = FormWindowState.Minimized;
+            Hide();
+        }
+    }
+
+    private void OpenSettings()
+    {
+        using var f = new SettingsForm(_settings, _settingsStore);
+        if (f.ShowDialog(this) == DialogResult.OK)
+        {
+            // re-apply live settings
+            _cmbLevel.SelectedIndex = _settings.CleanLevel switch { "Light" => 0, "Extreme" => 2, _ => 1 };
+            _cmbScope.SelectedIndex = _settings.SmartScope == "Nuclear" ? 1 : 0;
+            _minerTimer.Interval = Math.Clamp(_settings.MinerIntervalSec, 10, 600) * 1000;
+            _watchdog.AutoRekill = _settings.AutoRekill;
+        }
+    }
+
+    private void ContextAddToKeepList()
+    {
+        if (_list.SelectedItems.Count == 0) return;
+        int added = 0;
+        foreach (var item in _list.SelectedItems.Cast<ListViewItem>())
+        {
+            if (item.Tag is not SelectRow r) continue;
+            string name = r.Group != null ? NameFromPathOrKey(r.Group)
+                        : r.Proc != null ? r.Proc.Name : "";
+            if (name.Length == 0) continue;
+            var n = BlacklistStore.Normalize(name);
+            if (!_settings.KeepList.Contains(n))
+            {
+                _settings.KeepList.Add(n);
+                added++;
+            }
+        }
+        if (added > 0)
+        {
+            _settingsStore.Save(_settings);
+            LogService.Add("INFO", "SETTINGS", $"{added} app(s) added to the Smart Clean keep-list");
+            _lblStatus.Text = $"{added} app(s) are now protected from Smart Clean (keep-list).";
+        }
     }
 
     protected override void OnFormClosing(FormClosingEventArgs e)
@@ -283,6 +389,7 @@ internal sealed partial class MainForm : Form
             var ram = MemoryService.Read();
             _gauge.UsagePercent = ram.UsedPercent;
             _gauge.CenterText = $"{ram.UsedPercent:0}%";
+            _graph.AddSample(ram.UsedPercent);
             _lblUsed.Text = $"Used: {FormatUtil.Bytes((long)ram.Used)} / {FormatUtil.Bytes((long)ram.Total)}  ({ram.LoadPercent}%)";
             _lblAvail.Text = $"Available: {FormatUtil.Bytes((long)ram.Available)}";
             _lblProcs.Text = $"Processes: {_currentProcs.Count}   Apps: {_currentGroups.Count(g => !g.IsSystem)}";
@@ -404,7 +511,7 @@ internal sealed partial class MainForm : Form
 
     private void WatchTick()
     {
-        _watchdog.AutoRekill = _chkAutoRekill.Checked;
+        _watchdog.AutoRekill = _settings.AutoRekill;
         try
         {
             _watchdog.Tick();
@@ -414,11 +521,15 @@ internal sealed partial class MainForm : Form
             LogService.Add("ERR", "WATCHDOG", ex.Message);
         }
 
-        // auto clean
-        if (_chkAutoClean.Checked && (DateTime.Now - _lastAutoClean).TotalMinutes >= 10)
+        // auto clean (interval + optional RAM threshold from Settings)
+        if (_settings.AutoClean && (DateTime.Now - _lastAutoClean).TotalMinutes >= Math.Max(1, _settings.AutoCleanMinutes))
         {
-            _lastAutoClean = DateTime.Now;
-            DoCleanRam();
+            var ram = MemoryService.Read();
+            if (_settings.AutoCleanThreshold <= 0 || ram.UsedPercent >= _settings.AutoCleanThreshold)
+            {
+                _lastAutoClean = DateTime.Now;
+                DoCleanRam();
+            }
         }
     }
 

@@ -66,7 +66,15 @@ internal static class Program
         AppDomain.CurrentDomain.UnhandledException += (s, e) =>
             LogService.Add("ERR", "APP", e.ExceptionObject?.ToString() ?? "unknown exception");
 
-        Application.Run(new MainForm());
+        // load persisted settings and acquire cleaning privileges up-front
+        var store = new SettingsStore();
+        var settings = store.Load();
+        LogService.FileLogging = settings.LogToFile;
+        var priv = MemoryService.EnableAllPrivileges();
+        LogService.TryQuickLog("STARTUP",
+            "privileges: " + string.Join(", ", priv.Select(kv => kv.Key + "=" + (kv.Value ? "on" : "off"))));
+
+        Application.Run(new MainForm(settings));
         return 0;
     }
 

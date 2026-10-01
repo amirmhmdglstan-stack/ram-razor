@@ -10,8 +10,10 @@ internal sealed partial class MainForm
     {
         _busy = busy;
         Cursor = busy ? Cursors.WaitCursor : Cursors.Default;
-        foreach (var b in new[] { _btnClean, _btnCloseAll, _btnSel, _btnAllBut, _btnForceForever })
+        foreach (var b in new[] { _btnClean, _btnSmart, _btnCloseAll, _btnSel, _btnAllBut, _btnForceForever })
             b.Enabled = !busy;
+        _cmbLevel.Enabled = !busy;
+        _cmbScope.Enabled = !busy;
     }
 
     private List<AppGroup> VisibleTargetGroups()
@@ -71,27 +73,149 @@ internal sealed partial class MainForm
 
     // ================= clean RAM =================
 
+    private CleanMode SelectedCleanMode() => (_cmbLevel.SelectedItem?.ToString()) switch
+    {
+        "Light" => CleanMode.Light,
+        "Extreme" => CleanMode.Extreme,
+        _ => CleanMode.Deep
+    };
+
     private void DoCleanRam()
     {
         if (_busy) return;
         SetBusy(true);
         _btnClean.Text = "CLEANING…";
-        bool deep = _chkDeep.Checked;
+        var mode = SelectedCleanMode();
         Task.Run(() =>
         {
-            var result = MemoryService.Clean(deep);
+            var result = MemoryService.Clean(mode);
             BeginInvoke(() =>
             {
                 SetBusy(false);
                 _btnClean.Text = "CLEAN RAM";
                 _lastAutoClean = DateTime.Now;
-                _lblClean.Text = deep
-                    ? $"Deep clean freed {FormatUtil.Bytes(result.FreedBytes)} ({result.FreedPercentOfTotal}% of total RAM)"
-                    : $"Clean freed {FormatUtil.Bytes(result.FreedBytes)} ({result.FreedPercentOfTotal}% of total RAM)";
+                _lblClean.Text = $"{result.ModeName} clean freed {FormatUtil.Bytes(result.FreedBytes)} " +
+                                 $"({result.FreedPercentOfTotal}% of total RAM)\n{result.Note}";
                 _lblClean.ForeColor = result.FreedBytes > 0 ? Theme.Ok : Theme.TextDim;
                 LogService.Add("INFO", "CLEAN",
-                    $"{(deep ? "deep" : "soft")} clean freed {FormatUtil.Bytes(result.FreedBytes)} " +
+                    $"{result.ModeName} clean freed {FormatUtil.Bytes(result.FreedBytes)} " +
                     $"({result.BeforePercent:0.0}% → {result.AfterPercent:0.0}% used) — {result.Note}");
+                foreach (var s in result.Stages)
+                    LogService.Add(s.Ok ? "INFO" : "WARN", "CLEAN", $"stage '{s.Name}': {s.Detail}");
+                RefreshData();
+            });
+        });
+    }
+
+    // ================= smart clean (v2) =================
+
+    /// <summary>
+    /// The v2 headline action. Nothing ticked in the list -> close ALL
+    /// non-essential tasks per the selected scope, then purge memory.
+    /// Apps ticked in the list -> close exactly those + purge memory.
+    /// </summary>
+    private void DoSmartClean()
+    {
+        if (_busy) return;
+
+        var scope = _cmbScope.SelectedIndex == 1 ? SmartCleanScope.Nuclear : SmartCleanScope.Standard;
+        var checkedGroups = CheckedGroups();
+        var checkedProcs = CheckedProcs();
+        bool targeted = checkedGroups.Count > 0 || checkedProcs.Count > 0;
+
+        // preview how much a mass clean would close
+        int planned;
+        if (targeted)
+            planned = checkedGroups.Sum(g => g.Processes.Count) + checkedProcs.Count;
+        else
+            planned = SmartClean.PlanTargets(_currentProcs, scope, _settings.KeepList, _settings.IncludeServices).Count;
+
+        if (planned == 0)
+        {
+            MessageBox.Show("Nothing to close — everything running is protected.",
+                "Smart clean", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        string what = targeted
+            ? $"force-close the {planned} process(es) you ticked, then purge memory"
+            : scope == SmartCleanScope.Nuclear
+                ? $"close {planned} process(es) — EVERYTHING except Windows-critical components"
+                : $"close {planned} non-system process(es), then purge memory";
+
+        var mb = MessageBox.Show(
+            $"Smart clean ({scope}) will:\n{what}\n\n" +
+            (scope == SmartCleanScope.Nuclear
+                ? "Nuclear scope keeps ONLY the BSOD-critical set (csrss, wininit, services, lsass, svchost, dwm, …) " +
+                  "and your keep-list. The desktop shell is closed and restarted automatically.\n"
+                : "Windows system components are protected. Apps on your keep-list are spared.\n") +
+            "Unsaved work will be lost. Continue?",
+            "Smart clean", MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2);
+        if (mb != DialogResult.Yes) return;
+
+        SetBusy(true);
+        _btnSmart.Text = "CLEANING…";
+
+        if (targeted)
+        {
+            // kill exactly what was ticked, then purge
+            var groupsCopy = checkedGroups.ToList();
+            var procsCopy = checkedProcs.ToList();
+            Task.Run(() =>
+            {
+                foreach (var g in groupsCopy)
+                {
+                    var rep = ProcessKiller.KillGroup(g, force: true);
+                    LogService.Add(rep.Outcome == KillOutcome.Failed ? "ERR" : "INFO", "SMARTCLEAN",
+                        $"'{g.DisplayName}': {rep.Outcome} — {rep.Detail}");
+                }
+                foreach (var p in procsCopy)
+                {
+                    var (outcome, detail) = ProcessKiller.KillPidFast(p.Id);
+                    LogService.Add(outcome == KillOutcome.Failed ? "ERR" : "INFO", "SMARTCLEAN",
+                        $"task '{p.Name}' (pid {p.Id}): {outcome} — {detail}");
+                }
+                var mem = MemoryService.Clean(SelectedCleanMode());
+                BeginInvoke(() =>
+                {
+                    SetBusy(false);
+                    _btnSmart.Text = "SMART CLEAN";
+                    _lastAutoClean = DateTime.Now;
+                    _lblClean.Text = $"Smart clean closed {groupsCopy.Count} app(s) / {procsCopy.Count} task(s); " +
+                                     $"freed {FormatUtil.Bytes(mem.FreedBytes)} ({mem.FreedPercentOfTotal}% of RAM)";
+                    _lblClean.ForeColor = Theme.Ok;
+                    RefreshData();
+                });
+            });
+            return;
+        }
+
+        // mass smart clean
+        var mode = SelectedCleanMode();
+        Task.Run(() =>
+        {
+            var report = SmartClean.Execute(_enumerator, scope, _settings.KeepList,
+                _settings.IncludeServices, _settings.RestartExplorer, mode);
+            BeginInvoke(() =>
+            {
+                SetBusy(false);
+                _btnSmart.Text = "SMART CLEAN";
+                _lastAutoClean = DateTime.Now;
+                _lblClean.Text = $"Smart clean ({scope}): {report.Closed}/{report.Targets} closed, " +
+                                 $"{report.Failed.Count} failed — freed {FormatUtil.Bytes(report.FreedTotal)} " +
+                                 $"({report.BeforePercent:0.0}% → {report.AfterPercent:0.0}% used)" +
+                                 (report.ExplorerRestarted ? "\nexplorer.exe restarted" : "");
+                _lblClean.ForeColor = Theme.Ok;
+
+                foreach (var f in report.Failed)
+                    _pendingAlerts.Add(new AlertItem
+                    {
+                        Name = f.Split(' ')[0],
+                        Source = "unkillable",
+                        Detail = $"Smart clean could not close it: {f}"
+                    });
+                if (report.Failed.Count > 0) ShowAlertFormSafe();
+
                 RefreshData();
             });
         });
@@ -413,6 +537,21 @@ internal sealed partial class MainForm
                 if (!_alertSuppressed.Add("m:" + f.GroupKey) && !manual) continue;
                 if (_pendingAlerts.Any(a => a.Name == f.DisplayName)) continue;
 
+                LogService.Add("WARN", "MINER",
+                    $"suspected miner: '{f.DisplayName}' — {f.ReasonText} (score {f.Score:0})");
+
+                // optional zero-click response: kill + blacklist immediately
+                if (_settings.AutoKillMiners)
+                {
+                    var g2 = _currentGroups.FirstOrDefault(x => x.Key == f.GroupKey);
+                    if (g2 != null)
+                    {
+                        string status = ForceCloseForever(NameFromPathOrKey(g2), g2.ExePath, "auto-killed miner");
+                        LogService.Add("WARN", "MINER", $"auto response: {status}");
+                        continue;
+                    }
+                }
+
                 _pendingAlerts.Add(new AlertItem
                 {
                     Name = f.DisplayName,
@@ -421,8 +560,6 @@ internal sealed partial class MainForm
                     Detail = $"Suspicious mining-like behavior (score {f.Score:0}): {f.ReasonText}."
                 });
                 newOnes++;
-                LogService.Add("WARN", "MINER",
-                    $"suspected miner: '{f.DisplayName}' — {f.ReasonText} (score {f.Score:0})");
             }
 
             if (newOnes > 0) ShowAlertFormSafe();

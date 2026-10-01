@@ -105,13 +105,48 @@ public static class SelfTest
         // ---- Privilege acquisition (expected to FAIL on non-elevated CI — tolerant) ----
         try
         {
-            bool granted = MemoryService.EnablePrivilege("SeProfileSingleProcessPrivilege");
+            var priv = MemoryService.EnableAllPrivileges();
             results.Add(("Memory: privilege acquire", true,
-                granted ? "granted (elevated)" : "not granted (expected on non-elevated runner)"));
+                priv.Any(kv => kv.Value)
+                    ? "granted: " + string.Join(",", priv.Where(kv => kv.Value).Select(kv => kv.Key))
+                    : "not granted (expected on non-elevated runner)"));
         }
         catch (Exception ex)
         {
             results.Add(("Memory: privilege acquire", false, ex.Message));
+        }
+
+        // ---- v2 clean pipeline smoke test: must run to completion and report stages ----
+        // (on a non-elevated runner the kernel commands are rejected — the test
+        //  only proves the pipeline executes safely and reports per-stage status)
+        try
+        {
+            var res = MemoryService.Clean(CleanMode.Deep);
+            bool ok = res.TotalBytes > 0 && res.Stages.Count >= 4 && res.FreedBytes >= 0;
+            results.Add(("Memory v2: clean pipeline runs", ok,
+                ok ? $"mode={res.ModeName} stages={res.Stages.Count} freed={FormatUtil.Bytes(res.FreedBytes)} note={res.Note}"
+                   : $"total={res.TotalBytes} stages={res.Stages.Count}"));
+        }
+        catch (Exception ex)
+        {
+            results.Add(("Memory v2: clean pipeline runs", false, ex.Message));
+        }
+
+        // ---- Smart Clean planner against the REAL process table (no killing!) ----
+        try
+        {
+            var snap = new ProcessEnumerator().Snapshot();
+            var nuc = SmartClean.PlanTargets(snap, SmartCleanScope.Nuclear);
+            var std = SmartClean.PlanTargets(snap, SmartCleanScope.Standard);
+            bool protectedCore = !nuc.Any(p => p.Name is "csrss" or "wininit" or "winlogon" or "lsass" or "services" or "smss" or "dwm");
+            bool sane = snap.Count > 20 && protectedCore && nuc.Count > 0 && std.Count > 0;
+            results.Add(("SmartClean: planner on real snapshot", sane,
+                sane ? $"{snap.Count} procs -> standard {std.Count} / nuclear {nuc.Count} targets, core protected"
+                     : $"snap={snap.Count} std={std.Count} nuc={nuc.Count} coreOk={protectedCore}"));
+        }
+        catch (Exception ex)
+        {
+            results.Add(("SmartClean: planner on real snapshot", false, ex.Message));
         }
 
         return results;

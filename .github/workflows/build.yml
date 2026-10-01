@@ -90,7 +90,12 @@ jobs:
             out/portable/RAMRazor-portable.exe
             out/selftest-result.txt
           body: |
-            ## RAM Razor — Admin RAM cleaner for Windows 10/11
+            ## RAM Razor v2 — Admin RAM cleaner for Windows 10/11
+
+            **v2 highlights**
+            - Rebuilt clean engine (fixed kernel commands + multi-pass purge) — actually frees RAM now
+            - **SMART CLEAN**: nothing ticked → closes *every* non-essential task (Nuclear scope keeps only the BSOD-critical set), then purges memory
+            - Keep-list protection, full Settings dialog, auto-clean with RAM threshold, tray actions, RAM history graph, miner auto-kill
 
             **Downloads**
             - `RAMRazor.exe` — self-contained (no .NET install needed, ~40 MB). Just download and run as administrator.

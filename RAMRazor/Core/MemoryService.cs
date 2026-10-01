@@ -2,18 +2,40 @@ using System.Runtime.InteropServices;
 
 namespace RAMRazor.Core;
 
+public enum CleanMode { Light, Deep, Extreme }
+
 /// <summary>
-/// Physical RAM statistics and memory cleaning.
+/// Physical RAM statistics and the v2 memory-cleaning engine.
 ///
-/// Cleaning strategy (technique popularized by open-source tools such as
-/// Mem Reduct and WinMemoryCleaner — see README credits):
-///   1. NtSetSystemInformation(SystemMemoryListInformation / MemoryEmptyWorkingSets)
-///      — asks the kernel to trim working sets of all processes (SeIncreaseQuotaPrivilege).
-///   2. MemoryPurgeStandbyList — frees the standby list (SeProfileSingleProcessPrivilege).
-///   3. Per-process EmptyWorkingSet fallback + managed GC for our own process.
+/// v2 FIXES a critical v1 bug: the SYSTEM_MEMORY_LIST_COMMAND enum passed to
+/// NtSetSystemInformation is 0-based — EmptyWorkingSets = 2 and PurgeStandbyList
+/// = 4. v1 wrongly sent 3 and 5 (i.e. FlushModifiedList, which fails without
+/// privileges, and PurgeLowPriorityStandbyList, which has almost no visible
+/// effect) — that is why v1 cleaning appeared to "do nothing".
+///
+/// v2 sequence (technique matches Mem Reduct / WinMemoryCleaner, see README):
+///   1. Enable SeIncreaseQuotaPrivilege + SeProfileSingleProcessPrivilege + SeDebugPrivilege
+///   2. EmptyWorkingSets  (2)  — kernel trims every process working set
+///   3. PurgeStandbyList  (4)  — frees the standby list   (Deep, Extreme)
+///   4. FlushModifiedList (3)  — writes dirty pages out   (Extreme)
+///   5. Per-process SetProcessWorkingSetSize(-1,-1) fallback
+///   6. Second empty + purge pass (Deep, Extreme) so pages pushed to standby
+///      in step 5 actually get freed
+///   7. Own-process GC + trim
+/// Every stage is reported with its NTSTATUS so the user can SEE what worked.
 /// </summary>
 public static class MemoryService
 {
+    // ---- public, test-locked kernel command constants (see LogicSelfCheck) ----
+    public const int CmdCaptureAccessedBits = 0;
+    public const int CmdCaptureAndResetAccessedBits = 1;
+    public const int CmdEmptyWorkingSets = 2;            // SeIncreaseQuotaPrivilege
+    public const int CmdFlushModifiedList = 3;           // SeProfileSingleProcessPrivilege
+    public const int CmdPurgeStandbyList = 4;            // SeProfileSingleProcessPrivilege
+    public const int CmdPurgeLowPriorityStandbyList = 5;
+
+    private const int SystemMemoryListInformation = 80;
+
     [StructLayout(LayoutKind.Sequential)]
     private struct MEMORYSTATUSEX
     {
@@ -30,10 +52,6 @@ public static class MemoryService
 
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool GlobalMemoryStatusEx(ref MEMORYSTATUSEX lpBuffer);
-
-    private const int SystemMemoryListInformation = 80;
-    private const int MemoryEmptyWorkingSets = 3;      // requires SeIncreaseQuotaPrivilege
-    private const int MemoryPurgeStandbyList = 5;      // requires SeProfileSingleProcessPrivilege
 
     [DllImport("ntdll.dll")]
     private static extern int NtSetSystemInformation(int InfoClass, ref int Info, int Length);
@@ -119,81 +137,161 @@ public static class MemoryService
         catch { return false; }
     }
 
-    private static int SendMemoryListCommand(int command)
+    /// <summary>Enables all three privileges the clean engine needs.</summary>
+    public static Dictionary<string, bool> EnableAllPrivileges()
+    {
+        var d = new Dictionary<string, bool>();
+        foreach (var p in new[]
+                 {
+                     "SeIncreaseQuotaPrivilege",
+                     "SeProfileSingleProcessPrivilege",
+                     "SeDebugPrivilege"
+                 })
+            d[p] = EnablePrivilege(p);
+        return d;
+    }
+
+    /// <summary>Sends a SystemMemoryListInformation command; 0 = STATUS_SUCCESS. Exposed for tests.</summary>
+    public static int SendMemoryCommand(int command)
     {
         try
         {
             int cmd = command;
-            int size = sizeof(int);
-            int status = NtSetSystemInformation(SystemMemoryListInformation, ref cmd, size);
-            return status; // 0 = STATUS_SUCCESS
+            return NtSetSystemInformation(SystemMemoryListInformation, ref cmd, sizeof(int));
         }
         catch (DllNotFoundException) { return -1; }
         catch (EntryPointNotFoundException) { return -1; }
         catch { return -1; }
     }
 
-    /// <summary>Runs the RAM clean and reports how much was freed.</summary>
-    public static CleanResult Clean(bool deep)
-    {
-        var result = new CleanResult { DeepClean = deep };
+    private static string Status(int nt) => nt == 0 ? "ok" : (nt < 0 ? $"status 0x{nt:X8}" : $"status 0x{nt:X8}");
 
-        var before = Read();
+    /// <summary>Averages several samples so a momentary spike does not fake results.</summary>
+    private static RamInfo Sample(int count, int gapMs)
+    {
+        ulong total = 0, avail = 0; uint load = 0;
+        for (int i = 0; i < count; i++)
+        {
+            var r = Read();
+            total = r.Total;                    // constant
+            avail += r.Available;
+            load = Math.Max(load, r.LoadPercent);
+            if (i < count - 1) Thread.Sleep(gapMs);
+        }
+        return new RamInfo { LoadPercent = load, Total = total, Available = avail / (ulong)Math.Max(1, count) };
+    }
+
+    /// <summary>Runs the full v2 clean pipeline for the requested intensity.</summary>
+    public static CleanResult Clean(CleanMode mode)
+    {
+        var result = new CleanResult { Mode = mode, DeepClean = mode != CleanMode.Light };
+        var stages = new List<CleanStage>();
+
+        var before = Sample(3, 200);
         result.TotalBytes = before.Total;
         result.BeforePercent = before.UsedPercent;
+        result.BeforeBytes = before.Used;
 
         if (before.Total == 0)
         {
             result.Note = "could not query memory status";
+            result.Stages = stages;
             return result;
         }
 
-        // 1) Standby list purge (deep clean)
-        if (deep)
+        // 0) privileges first — without these the kernel commands are rejected
+        var priv = EnableAllPrivileges();
+        result.Privileges = priv;
+        stages.Add(new CleanStage
         {
-            bool ok = EnablePrivilege("SeProfileSingleProcessPrivilege");
-            int status = SendMemoryListCommand(MemoryPurgeStandbyList);
-            result.StandbyPurged = ok && status == 0;
-            if (ok && status != 0)
-                result.Note = $"standby purge status 0x{status:X8}; ";
+            Name = "acquire privileges",
+            Ok = priv.Values.Any(v => v),
+            Detail = string.Join(", ", priv.Select(kv => kv.Key.Replace("Se", "").Replace("Privilege", "") + " " + (kv.Value ? "on" : "off")))
+        });
+
+        // 1) kernel-wide working-set trim — pushes private pages towards standby/modified
+        int ws1 = SendMemoryCommand(CmdEmptyWorkingSets);
+        stages.Add(new CleanStage { Name = "empty working sets (all processes)", Ok = ws1 == 0, Detail = Status(ws1) });
+
+        // 2) standby purge — the step that actually turns cached pages into free RAM
+        if (mode != CleanMode.Light)
+        {
+            int sb = SendMemoryCommand(CmdPurgeStandbyList);
+            stages.Add(new CleanStage { Name = "purge standby list", Ok = sb == 0, Detail = Status(sb) });
         }
 
-        // 2) System-wide working set emptying
-        bool quotaOk = EnablePrivilege("SeIncreaseQuotaPrivilege");
-        int wsStatus = SendMemoryListCommand(MemoryEmptyWorkingSets);
+        // 3) modified-page flush — writes dirty pages to the pagefile and frees them (heavy, Extreme only)
+        if (mode == CleanMode.Extreme)
+        {
+            int fm = SendMemoryCommand(CmdFlushModifiedList);
+            stages.Add(new CleanStage { Name = "flush modified page list", Ok = fm == 0, Detail = Status(fm) });
+        }
 
-        // 3) Per-process fallback (EmptyWorkingSet equivalent through Kill? no — uses SetProcessWorkingSetSize)
-        TrimWorkingSetsFallback();
+        // 4) per-process fallback trim (covers processes the kernel pass may miss)
+        int trimmed = TrimWorkingSetsFallback();
+        stages.Add(new CleanStage { Name = "per-process working-set trim", Ok = trimmed >= 0, Detail = $"{Math.Max(0, trimmed)} processes trimmed" });
 
-        // 4) Managed GC for our own process
-        GC.Collect(2, GCCollectionMode.Forced, blocking: true, compacting: true);
-        GC.WaitForPendingFinalizers();
+        // 5) second pass: pages pushed out in step 4 are now in standby — purge again
+        if (mode != CleanMode.Light)
+        {
+            int ws2 = SendMemoryCommand(CmdEmptyWorkingSets);
+            int sb2 = SendMemoryCommand(CmdPurgeStandbyList);
+            stages.Add(new CleanStage
+            {
+                Name = "second pass (empty + purge)",
+                Ok = ws2 == 0 && sb2 == 0,
+                Detail = Status(ws2) + " / " + Status(sb2)
+            });
+        }
 
-        Thread.Sleep(900);
+        // 6) our own process: full GC + trim
+        try
+        {
+            GC.Collect(2, GCCollectionMode.Forced, blocking: true, compacting: true);
+            GC.WaitForPendingFinalizers();
+            _ = SetProcessWorkingSetSize(GetCurrentProcess(), (IntPtr)(-1), (IntPtr)(-1));
+            stages.Add(new CleanStage { Name = "self GC + trim", Ok = true, Detail = "done" });
+        }
+        catch (Exception ex)
+        {
+            stages.Add(new CleanStage { Name = "self GC + trim", Ok = false, Detail = ex.Message });
+        }
 
-        var after = Read();
+        Thread.Sleep(1200);
+        var after = Sample(3, 200);
         result.AfterPercent = after.UsedPercent;
+        result.AfterBytes = after.Used;
         long freed = (long)after.Available - (long)before.Available;
         result.FreedBytes = Math.Max(0, freed);
+        result.Stages = stages;
 
-        if (string.IsNullOrEmpty(result.Note))
-            result.Note = wsStatus == 0 || quotaOk ? "ok" : $"working-set command status 0x{wsStatus:X8}";
+        var failed = stages.Where(s => !s.Ok).ToList();
+        result.Note = failed.Count == 0
+            ? "all stages ok"
+            : "stage issues: " + string.Join("; ", failed.Select(f => $"{f.Name} [{f.Detail}]"));
         return result;
     }
 
-    private static void TrimWorkingSetsFallback()
+    /// <summary>Backwards-compatible wrapper.</summary>
+    public static CleanResult Clean(bool deep) => Clean(deep ? CleanMode.Deep : CleanMode.Light);
+
+    /// <returns>number of processes actually trimmed, or -1 on global failure</returns>
+    private static int TrimWorkingSetsFallback()
     {
-        // Soft-trim every accessible process through SetProcessWorkingSetSize(-1,-1).
+        int trimmed = 0, seen = 0;
         foreach (var p in System.Diagnostics.Process.GetProcesses())
         {
             try
             {
-                if (p.Id == Environment.ProcessId) continue;
-                _ = SetProcessWorkingSetSize(p.Handle, (IntPtr)(-1), (IntPtr)(-1));
+                if (p.Id == Environment.ProcessId) { continue; }
+                seen++;
+                if (SetProcessWorkingSetSize(p.Handle, (IntPtr)(-1), (IntPtr)(-1)))
+                    trimmed++;
             }
             catch { /* protected process — skip */ }
             finally { try { p.Dispose(); } catch { } }
         }
+        return seen == 0 ? -1 : trimmed;
     }
 
     [DllImport("kernel32.dll", SetLastError = true)]

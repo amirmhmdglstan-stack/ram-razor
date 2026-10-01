@@ -1,139 +1,135 @@
-# RAM Razor 🪒
+# RAM Razor ⚡
 
-**An admin-only RAM cleaner & background-app terminator for Windows 10 / Windows 11.**
-One click closes every unnecessary app until only protected Windows system tasks remain — and it keeps watching.
+**Admin-only RAM cleaner & background-app terminator for Windows 10 / Windows 11.**
 
-![platform](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-blue) ![runtime](https://img.shields.io/badge/.NET-8.0%20WinForms-purple) ![license](https://img.shields.io/badge/license-MIT-green) ![ci](https://img.shields.io/badge/CI-GitHub%20Actions%20(build%20%2B%20self--test)-success)
+RAM Razor shows what is eating your memory, closes it, and purges the memory Windows refuses to give back — with a full activity log, a miner watchdog, a permanent blacklist and a user keep-list.
+
+> v2 note: v1's RAM purge sent the wrong kernel commands (see "What was fixed in v2" below), so cleaning had almost no visible effect. v2 is a complete re-engineering of the clean engine — it now actually frees RAM.
 
 ---
 
-## What it does
+## Download
 
-RAM Razor scans every running process, groups them into real **apps** (all processes of one executable = one app), protects everything Windows needs to survive, and gives you brutal one-click cleanup tools:
-
-| Feature | Description |
+| File | What it is |
 |---|---|
-| **CLOSE ALL APPS** | Force-closes **every** non-system app (full process tree). Only protected Windows system tasks survive. A watchdog then watches for 25 s and notes every app that **re-opens itself**, with an optional *auto re-kill* mode. |
-| **Live RAM gauge** | Circular gauge + used/total/available + usage %. |
-| **CLEAN RAM** | Working-set trim + optional **standby-list purge** (deep clean) using the same native technique as Mem Reduct. Shows exactly **how many MB / % of total RAM were freed**. Auto-clean every 10 min is optional. |
-| **Close selected…** | Opens a checklist of all running apps/tasks → close what you tick. |
-| **Close all but selected…** | Opens the same checklist → you pick the survivors, everything else dies. |
-| **Force close selected (forever)** | Sends the ticked apps to the permanent **Blacklist**: closed now, killed on sight forever. |
-| **Blacklist manager** | Remove entries (allow the app again) or clear the whole list. |
-| **Miner detection** | Heuristic background **crypto-miner scanner**: known miner names, sustained high CPU with no window, live connections to mining-pool (Stratum) ports. Fires a warning card with **Force close (forever)** and **Force delete** buttons per app. |
-| **Apps ↔ Tasks views** | *Apps* mode shows one row per app with all its related processes merged; *Tasks* mode lists every process individually. System tasks are hidden by default (toggle available). |
-| **Activity log** | Every closed app, every failure (with reason), every re-opener, every clean and miner hit — in the app and in `%ProgramData%\RAMRazor\logs\app-YYYYMMDD.log`. |
-| **Admin gate** | Without Administrator access the app **refuses to start** (error + exit code 740) — by design. |
-| **Tray mode** | Minimizes to the system tray; double-click the tray icon to restore. |
+| [`RAMRazor.exe`](../../releases/latest) | **Self-contained** (~40–60 MB). No .NET install needed. Download → right-click → *Run as administrator*. |
+| [`RAMRazor-portable.exe`](../../releases/latest) | Tiny portable build (~0.3 MB). Needs the free [.NET 8 Desktop Runtime](https://dotnet.microsoft.com/download/dotnet/8.0/runtime) (**Desktop Runtime x64**). |
 
-Extra: failed-to-close or self-re-opening apps automatically pop up the warning card, so "the apps that can't be closed (open automatically)" are always surfaced with their force buttons.
+Every published build has passed an automated self-test (`RAMRazor.exe --selftest`) on a real Windows machine — see `selftest-result.txt` attached to the release.
+
+**The app refuses to start without Administrator rights by design** — process control and kernel memory cleaning are impossible without elevation. It exits with error code 740 (elevation required).
 
 ---
 
-## Download & run
+## What RAM Razor does
 
-Go to **[Releases](../../releases)** and pick:
+### The two headline buttons
 
-| File | Size | Needs |
+| Button | Behavior |
+|---|---|
+| **CLEAN RAM** | Pure memory purge with the intensity selected underneath it:<br>• **Light** — kernel working-set trim (all processes)<br>• **Deep** — + standby list purge, second empty+purge pass<br>• **Extreme** — + modified page list flush (heaviest, frees the most) |
+| **SMART CLEAN** | The v2 flagship. **With nothing ticked** it closes *every process that is not needed to keep Windows alive*, then purges memory.<br>• **Standard scope** — closes all non-system apps and background junk, shell stays.<br>• **Nuclear scope** — closes EVERYTHING except the BSOD-critical set (see below) and your keep-list; the desktop shell (explorer.exe) is closed too and **restarted automatically**.<br>**With apps ticked** in the list — closes exactly those, then purges. |
+
+Every stage of every clean is reported in the Activity log with its NTSTATUS — you can *see* what worked instead of guessing.
+
+### Mass-close tools
+
+- **CLOSE ALL APPS** — force-closes all non-system apps (system components protected), then auto-purges.
+- **Close selected… / Close all but selected…** — pick targets from the full list (Apps or Tasks view), the rest is kept.
+- **Force close selected (forever)** — puts the selected apps on the permanent **blacklist**: they are closed now and killed on sight every time they start again. Manage it in the **Blacklist** window.
+
+### Miner watchdog
+
+A background heuristic scanner (every 10–120 s, configurable) flags:
+
+- known miner names/signatures (xmrig, cpuminer, ethminer, nbminer, …),
+- windowless processes pegging CPU,
+- processes holding Stratum-like TCP connections.
+
+Findings pop up as warning cards with **Force close (forever)** (blacklist) and **Force delete** (close + quarantine the executable). Optionally enable **auto kill + blacklist** in Settings for zero-click response.
+
+### Views & lists
+
+- **Apps / Tasks** radio buttons: group processes per executable (an app = all its helper processes) or list every task individually.
+- **Show system tasks** to see protected system components (read-only for system safety).
+- Right-click any row: close, force close, blacklist forever, **protect from Smart Clean (keep-list)**, copy path.
+- Live RAM gauge + **RAM history graph** + used/available/processes counters.
+
+### Automation & settings (Settings dialog)
+
+- Clean intensity + Smart Clean scope
+- Nuclear: auto-restart explorer, optionally include session-0 service hosts
+- Auto CLEAN RAM every 5–60 min, optionally only when RAM ≥ a threshold %
+- Clean at startup / start minimized in tray
+- Auto re-kill apps that re-open themselves after being closed
+- Miner scan interval + auto-kill miners
+- Activity log on/off (`%ProgramData%\RAMRazor\logs\`)
+- **Keep-list** editor — apps Smart Clean must never close
+
+### Tray
+
+Closing the window minimizes to the notification tray. Tray menu: **Show / Clean RAM now / Smart clean now / Exit**.
+
+---
+
+## Safety model
+
+**Never killed (Standard scope + Close All):** everything classified as system — kernel processes, session-0 service hosts, `C:\Windows` binaries, Defender, the shell, search, driver hosts, RAM Razor itself.
+
+**Never killed (Nuclear scope) — the BSOD-critical set:**
+
+```
+System, Idle, Secure System, Registry, Memory Compression,
+smss, csrss, wininit, winlogon, services, svchost, lsass,
+dwm, fontdrvhost, RAM Razor itself
+```
+
+Everything else dies in nuclear mode — that is the point — but:
+
+- your **keep-list** apps are always spared,
+- killing services (session 0) is opt-in and off by default,
+- explorer.exe is restarted automatically,
+- everything is logged, and unkillable processes are reported in warning cards.
+
+**Force delete** never destroys files: executables are moved to `C:\ProgramData\RAMRazor\quarantine\` (or scheduled for deletion at next reboot if locked).
+
+---
+
+## What was fixed in v2
+
+v1 called `NtSetSystemInformation(SystemMemoryListInformation, …)` with the wrong command values. The real Windows enum is **0-based**:
+
+| Command | v1 sent | v2 sends |
 |---|---|---|
-| `RAMRazor.exe` | ~40 MB | Nothing. .NET is embedded. **Just download and run.** |
-| `RAMRazor-portable.exe` | ~1 MB | [.NET 8 Desktop Runtime](https://dotnet.microsoft.com/download/dotnet/8.0/runtime) (x64) |
+| `MemoryEmptyWorkingSets` | ❌ 3 (actually *FlushModifiedList* → rejected) | ✅ **2** |
+| `MemoryPurgeStandbyList` | ❌ 5 (actually *PurgeLowPriorityStandbyList* → barely visible) | ✅ **4** |
 
-> **Always start it with *Run as administrator*.**
-> Without admin rights RAM Razor shows an error and does not open — it cannot do its job un-elevated.
+So v1 "cleaned" without freeing anything. v2 also:
 
-### Quick start
-1. Right-click the exe → **Run as administrator**.
-2. Watch the gauge: it shows your live RAM usage %.
-3. Press **CLOSE ALL APPS** when things get heavy — or tick apps in the list and use the selective buttons.
-4. Press **CLEAN RAM** to squeeze out working-set + standby memory. The label under the gauge tells you exactly what was freed.
-5. Check **Activity log** to see everything that was closed, everything that refused to die, and anything that tried to come back.
-
-### Notes on safety
-- Protected processes: kernel, services (session 0), `explorer`, shell hosts, Defender, audio, GPU driver containers, etc. — see `RAMRazor/Core/SystemWhitelist.cs`.
-- *Force delete* never erases blindly: the executable is moved into `%ProgramData%\RAMRazor\quarantine\`; only if the file is locked it is scheduled for deletion at next reboot (Windows `MoveFileEx`).
-- Everything destructive asks for confirmation first.
+- enables all three required privileges up-front (`SeIncreaseQuotaPrivilege`, `SeProfileSingleProcessPrivilege`, `SeDebugPrivilege`),
+- runs a **multi-pass pipeline** (trim → purge → per-process trim → trim+purge again) so pages pushed out by working-set trims are actually freed,
+- reports **every stage** with its status,
+- adds the **Smart Clean** mass-terminator, the keep-list, settings persistence, tray actions, RAM history graph, auto-clean with threshold, clean-at-startup, and miner auto-kill.
 
 ---
 
 ## Building from source
 
-Requirements: **.NET 8 SDK** (any OS for compiling; a Windows machine for running).
-
 ```bash
-# plain build
 dotnet build RAMRazor/RAMRazor.csproj -c Release
-
-# the exe you probably want: single file, no runtime needed
-dotnet publish RAMRazor/RAMRazor.csproj -c Release -r win-x64 --self-contained true \
-  -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true \
-  -p:EnableCompressionInSingleFile=true -o out
-
-# tiny portable variant (needs .NET 8 Desktop Runtime on the target PC)
-dotnet publish RAMRazor/RAMRazor.csproj -c Release -r win-x64 --self-contained false \
-  -p:PublishSingleFile=true -o out
+dotnet publish RAMRazor/RAMRazor.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true
 ```
 
-### CI/CD (GitHub Actions)
-`.github/workflows/build.yml` runs on every push to `main` and on every `v*` tag:
+GitHub Actions (`.github/workflows/build.yml`) builds, runs the self-test on a real Windows runner and attaches both exes to a Release on every `v*` tag.
 
-1. Builds in `Release`.
-2. Publishes **both** exe variants (self-contained + portable).
-3. **Actually runs the built exe** in headless self-test mode (`RAMRazor.exe --selftest`) on the Windows runner and fails the pipeline if any check fails — the report is uploaded as `selftest-result.txt` and attached to releases.
-4. Tag pushes (`v1.0.0`, …) additionally publish a GitHub **Release** with the exes attached.
+Headless self-test (also runs in CI): `RAMRazor.exe --selftest`
 
-The self-test covers: system-whitelist classification, miner heuristics (positive + negative), blacklist persistence round-trip, log service round-trip, memory-statistics P/Invoke, live process enumeration, **spawning a real child process and force-closing it through the killer pipeline**, TCP-table parsing (miner plumbing), and privilege acquisition (tolerant on non-elevated runners).
+## Credits
 
-### Local logic tests (works on Linux/macOS too)
-```bash
-dotnet run --project tests/TestLogic
-```
+Techniques and inspiration from excellent open-source projects:
 
----
+- [Mem Reduct](https://github.com/henrypp/memreduct) (henrypp) — standby list purge / working-set emptying via `NtSetSystemInformation`
+- [WinMemoryCleaner](https://github.com/IgorMundstein/WinMemoryCleaner) (IgorMundstein) — aggressive combined clean passes
+- [System Informer (Process Hacker)](https://github.com/winsiderss/systeminformer) — process enumeration and system-process classification ideas
 
-## Project layout
-
-```
-RAMRazor/
-  Program.cs               entry point, admin gate, single-instance, self-test dispatch
-  SelfTest.cs              headless CI self-test (--selftest)
-  Core/
-    AppModels.cs           ProcInfo / AppGroup / KillReport / CleanResult / AlertItem
-    SystemWhitelist.cs     protected Windows system tasks
-    ProcessEnumerator.cs   snapshot + CPU deltas + app grouping (Apps/Tasks views)
-    ProcessKiller.cs       graceful → taskkill /T /F → Kill(tree); quarantine helpers
-    MemoryService.cs       RAM stats, working-set trim, standby purge, clean %
-    MinerDetector.cs       miner heuristics + live TCP pool-port detection
-    BlacklistStore.cs      persistent force-close-forever list (JSON)
-    LogService.cs          activity log (file + in-app + events)
-    Watchdog.cs            re-opener detection / auto re-kill / blacklist enforcement
-    LogicSelfCheck.cs      shared platform-neutral test battery
-  UI/
-    MainForm(.Actions).cs  dashboard, gauge, list, all buttons & flows
-    RamGauge.cs            circular usage gauge
-    ProcessSelectForm.cs   "close selected" / "keep selected" checklist
-    BlacklistForm.cs       blacklist manager
-    MinerAlertForm.cs      warning card (miners / unkillable / re-openers)
-    LogForm.cs             activity log viewer
-    Theme.cs               dark theme helpers
-```
-
----
-
-## Credits — similar open-source projects that inspired this
-
-RAM Razor is an original implementation, but it deliberately borrows proven *techniques* from these excellent open-source projects:
-
-| Project | What was borrowed |
-|---|---|
-| **[Mem Reduct](https://github.com/henrypp/memreduct)** (Henry++, GPL-3.0) | The native memory-cleaning approach: `NtSetSystemInformation(SystemMemoryListInformation)` with `MemoryEmptyWorkingSets` + `MemoryPurgeStandbyList` and the required token privileges. |
-| **[WinMemoryCleaner](https://github.com/IgorMundstein/WinMemoryCleaner)** (C#) | Confirmation that this technique is solid from managed C# code; privilege handling pattern. |
-| **[System Informer (Process Hacker)](https://github.com/SystemInformer/SystemInformer)** (GPL-3.0) | Process-tree termination strategy, working-set trimming per process, general process-management UX ideas. |
-| **[Sysinternals Process Explorer](https://learn.microsoft.com/sysinternals/downloads/process-explorer)** (free, not OSS) | The "group by executable" mental model behind the Apps view. |
-| Miner-detection heuristics | Community knowledge of Stratum pool ports (3333/4444/5555/7777/14444/…) and known miner binary names (XMRig, NBMiner, T-Rex, …). |
-
-No source code was copied from any of them — only public Windows API knowledge and ideas. Thank you, open source!
-
-## License
-
-MIT — see [LICENSE](LICENSE).
+RAM Razor is MIT-licensed. Use the nuclear scope at your own discretion — it does exactly what it says.

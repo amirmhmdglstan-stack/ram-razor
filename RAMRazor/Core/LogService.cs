@@ -13,6 +13,9 @@ public static class LogService
 
     public static event Action<string, string, string>? EntryAdded; // level, category, message
 
+    /// <summary>File output gate (Settings -> log to file).</summary>
+    public static bool FileLogging { get; set; } = true;
+
     public static string LogDirectory
     {
         get
@@ -43,13 +46,16 @@ public static class LogService
             snapshot = _recent.ToList();
         }
 
-        try
+        if (FileLogging)
         {
-            var file = Path.Combine(_dir!, $"app-{DateTime.Now:yyyyMMdd}.log");
-            using var w = new StreamWriter(file, append: true) { AutoFlush = true };
-            w.WriteLine(line);
+            try
+            {
+                var file = Path.Combine(_dir!, $"app-{DateTime.Now:yyyyMMdd}.log");
+                using var w = new StreamWriter(file, append: true) { AutoFlush = true };
+                w.WriteLine(line);
+            }
+            catch { /* log IO must never crash the app */ }
         }
-        catch { /* log IO must never crash the app */ }
 
         try { EntryAdded?.Invoke(level, category, message); } catch { }
     }

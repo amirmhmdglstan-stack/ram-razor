@@ -124,6 +124,95 @@ public static class LogicSelfCheck
                   Math.Abs(appGroup.MemBytes - 300) < 1 && appGroup.HasWindow;
         results.Add(("Grouping: same exe = one app", g1, g1 ? "2 procs merged" : "FAILED"));
 
+        // ---- 6. v2 memory engine: kernel command constants must be the real 0-based enum ----
+        bool c1 = MemoryService.CmdEmptyWorkingSets == 2 && MemoryService.CmdPurgeStandbyList == 4 &&
+                  MemoryService.CmdFlushModifiedList == 3;
+        results.Add(("Memory v2: kernel command constants", c1,
+            c1 ? "EmptyWS=2 FlushModified=3 PurgeStandby=4" : "WRONG CONSTANTS"));
+
+        // ---- 7. Smart Clean planner: standard scope ----
+        var fakeSnap = new List<ProcInfo>
+        {
+            new() { Id = 10, Name = "chrome", SessionId = 1, ExePath = @"C:\Users\x\chrome.exe" },
+            new() { Id = 11, Name = "steam", SessionId = 1, ExePath = @"C:\Program Files\steam.exe" },
+            new() { Id = 12, Name = "explorer", SessionId = 1, ExePath = @"C:\Windows\explorer.exe" },
+            new() { Id = 13, Name = "svchost", SessionId = 0, ExePath = @"C:\Windows\System32\svchost.exe" },
+            new() { Id = 14, Name = "notepad", SessionId = 1, ExePath = @"C:\Windows\notepad.exe" }
+        };
+        var stdTargets = SmartClean.PlanTargets(fakeSnap, SmartCleanScope.Standard);
+        bool s1 = stdTargets.Any(t => t.Name == "chrome") && stdTargets.Any(t => t.Name == "steam") &&
+                  stdTargets.Any(t => t.Name == "notepad") &&
+                  !stdTargets.Any(t => t.Name is "explorer" or "svchost");
+        results.Add(("SmartClean: standard plan", s1,
+            s1 ? "user apps targeted, shell+services spared" : $"targets: {string.Join(", ", stdTargets.Select(t => t.Name))}"));
+
+        // ---- 8. Smart Clean planner: nuclear scope keeps only the BSOD-critical set ----
+        var nucTargets = SmartClean.PlanTargets(fakeSnap, SmartCleanScope.Nuclear);
+        bool s2 = nucTargets.Any(t => t.Name is "explorer" or "chrome" or "steam" or "notepad") &&
+                  !nucTargets.Any(t => t.Name == "svchost");
+        results.Add(("SmartClean: nuclear plan", s2,
+            s2 ? "shell + apps closed, svchost spared" : $"targets: {string.Join(", ", nucTargets.Select(t => t.Name))}"));
+
+        // ---- 9. Smart Clean planner: critical set sanity ----
+        bool s3 = SmartClean.IsCriticalName("csrss") && SmartClean.IsCriticalName("winlogon") &&
+                  SmartClean.IsCriticalName("lsass") && SmartClean.IsCriticalName("Memory Compression") &&
+                  SmartClean.IsCriticalName("dwm") && !SmartClean.IsCriticalName("chrome") &&
+                  !SmartClean.IsCriticalName("explorer");
+        results.Add(("SmartClean: BSOD-critical set", s3, s3 ? "core set protected" : "FAILED"));
+
+        // ---- 10. Smart Clean planner: user keep-list protects apps ----
+        var keepTargets = SmartClean.PlanTargets(fakeSnap, SmartCleanScope.Nuclear,
+            keepList: new[] { "CHROME.exe" }); // normalization must make case/extension irrelevant
+        bool s4 = !keepTargets.Any(t => t.Name == "chrome") &&
+                  keepTargets.Any(t => t.Name == "steam");
+        results.Add(("SmartClean: keep-list protection", s4,
+            s4 ? "chrome spared, steam still targeted" : "FAILED"));
+
+        // ---- 11. Smart Clean planner: session-0 services only with IncludeServices ----
+        var serviceSnap = new List<ProcInfo>
+        {
+            new() { Id = 20, Name = "wmiprvse", SessionId = 0, ExePath = @"C:\Windows\System32\wbem\wmiprvse.exe" }
+        };
+        bool s5 = SmartClean.PlanTargets(serviceSnap, SmartCleanScope.Nuclear, includeServices: false).Count == 0 &&
+                  SmartClean.PlanTargets(serviceSnap, SmartCleanScope.Nuclear, includeServices: true).Count == 1;
+        results.Add(("SmartClean: services gate", s5, s5 ? "session-0 opt-in works" : "FAILED"));
+
+        // ---- 12. Settings store round-trip (isolated temp dir) ----
+        string stDir = Path.Combine(Path.GetTempPath(), "ramrazor-settest-" + Guid.NewGuid().ToString("N")[..8]);
+        try
+        {
+            var store = new SettingsStore(stDir);
+            var settings = new AppSettings
+            {
+                CleanLevel = "Extreme",
+                SmartScope = "Nuclear",
+                RestartExplorer = false,
+                AutoClean = true,
+                AutoCleanMinutes = 15,
+                AutoCleanThreshold = 80,
+                StartInTray = true,
+                MinerIntervalSec = 60,
+                AutoKillMiners = true,
+                KeepList = { "chrome", "my-game" }
+            };
+            store.Save(settings);
+            var reloaded = new SettingsStore(stDir).Load();
+            bool r1 = reloaded.CleanLevel == "Extreme" && reloaded.SmartScope == "Nuclear" &&
+                      !reloaded.RestartExplorer && reloaded.AutoClean && reloaded.AutoCleanMinutes == 15 &&
+                      reloaded.AutoCleanThreshold == 80 && reloaded.StartInTray &&
+                      reloaded.MinerIntervalSec == 60 && reloaded.AutoKillMiners &&
+                      reloaded.KeepList.Count == 2 && reloaded.KeepList.Contains("chrome");
+            results.Add(("Settings: persist + reload", r1, r1 ? "all fields round-tripped" : "MISMATCH"));
+        }
+        catch (Exception ex)
+        {
+            results.Add(("Settings: round-trip", false, ex.Message));
+        }
+        finally
+        {
+            try { Directory.Delete(stDir, true); } catch { }
+        }
+
         return results;
     }
 }
